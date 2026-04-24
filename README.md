@@ -16,7 +16,7 @@ pip install -r requirements.txt
 ## Usage
 
 ```python
-from rutube_downloader import RutubeDownloader
+from rutube_downloader.main import RutubeDownloader
 
 downloader = RutubeDownloader()
 downloader.download_video(
