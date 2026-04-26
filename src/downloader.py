@@ -1,20 +1,10 @@
+import asyncio
 import os
 import re
 import time
-import ffmpeg
-import atexit
-import requests
+import httpx
 from typing import Dict, Optional, Tuple
 from urllib.parse import urljoin
-
-temp_file_paths = []
-
-def cleanup():
-    for filepath in temp_file_paths:
-        if os.path.exists(filepath):
-            os.remove(filepath)
-
-atexit.register(cleanup)
 
 class RutubeDownloader():
     def __init__(self):
@@ -24,14 +14,21 @@ class RutubeDownloader():
         self.player_ver = '2.109.0'
         self.user_agent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36'
 
-        self.session = requests.Session()
-        self.session.headers = {
+        self.headers = {
             'User-Agent': self.user_agent,
             'Origin': self.base_url,
             'Referer': self.base_url
         }
 
-    def get_video_options(
+    async def __aenter__(self):
+        self.client = httpx.AsyncClient(headers=self.headers, follow_redirects=True)
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        if self.client:
+            await self.client.aclose()
+
+    async def get_video_options(
         self,
         video_id: str,
         request_params: Optional[Dict] = None
@@ -50,20 +47,20 @@ class RutubeDownloader():
                 'yclid': None
             }
 
-        response = self.session.get(f'{self.api_url}/play/options/{video_id}', params=request_params)
+        response = await self.client.get(f'{self.api_url}/play/options/{video_id}', params=request_params)
         if response.status_code == 200:
             return response.json()
         else:
             print(f'[{response.status_code}] Unknown error when receiving video options')
-            return None
+            return
 
-    def get_master_playlist(self, url: str) -> Optional[str]:
-        response = self.session.get(url)
+    async def get_master_playlist(self, url: str) -> Optional[str]:
+        response = await self.client.get(url)
         if response.status_code == 200:
             return response.text
         else:
             print(f'[{response.status_code}] Unknown error when receiving master playlist')
-            return None
+            return
 
     def get_best_quality_url(self, master_playlist: str) -> Tuple[Optional[str], Optional[int]]:
         try:
@@ -90,22 +87,19 @@ class RutubeDownloader():
             print(f'[!] Error parsing master playlist: {e}')
             return None, None
 
-    def download_segments(
+    async def download_segments(
         self,
         url: str,
         bandwidth: int,
         video_options: Dict,
         output_filename: str
     ):
-        response = self.session.get(url)
+        response = await self.client.get(url)
         if response.status_code == 200:
             raw_segments = response.text
         else:
             print(f'[{response.status_code}] Unknown error when receiving segments')
-            return None
-
-        temp_ts = os.path.abspath(f'temp_{int(time.time())}.ts')
-        temp_file_paths.append(temp_ts)
+            return
 
         segments = [line.strip() for line in raw_segments.splitlines() if line.endswith('.ts')]
 
@@ -114,13 +108,13 @@ class RutubeDownloader():
         time_start = time.perf_counter()
         base_url = urljoin(url.rsplit('/', 1)[0] + '/', '')
 
-        with open(temp_ts, 'ab') as final_file:
+        with open(output_filename, 'wb') as f:
             for i, segment_name in enumerate(segments):
                 segment_path = f'{base_url}/{segment_name}'
 
-                segment_response = self.session.get(segment_path)
+                segment_response = await self.client.get(segment_path)
                 if segment_response.status_code == 200:
-                    final_file.write(segment_response.content)
+                    f.write(segment_response.content)
                     downloaded_bytes += len(segment_response.content)
 
                     elapsed_time = time.perf_counter() - time_start
@@ -128,31 +122,71 @@ class RutubeDownloader():
                     speed = mb / elapsed_time if elapsed_time > 0 else 0
                     print(f'[i] {mb:.2f} MB | Speed: {speed:.2f} MB/s | Segment №{i}/{len(segments)}', end='\r', flush=True)
 
-        try:
-            ffmpeg.input(temp_ts).output(output_filename, c='copy').run(quiet=True)
-            print('[+] The video has been pasted together. Enjoy watching!')
-
-        except ffmpeg.Error as e:
-            print(e.stderr.decode('utf-8'))
-
-        finally:
-            os.remove(temp_ts)
-
-    def download_video(
+    async def download_video(
         self,
         video_id: str,
         output_filename: Optional[str] = None
     ):
         print('[i] Getting video options')
-        options = self.get_video_options(video_id=video_id)
+        options = await self.get_video_options(video_id=video_id)
         if options:
             print('[i] Getting master playlist')
             master_playlist_url = options['video_balancer']['default']
-            master_playlist = self.get_master_playlist(master_playlist_url)
+            master_playlist = await self.get_master_playlist(master_playlist_url)
             if master_playlist:
                 segments_url, bandwidth = self.get_best_quality_url(master_playlist)
-                self.download_segments(segments_url, bandwidth, options, output_filename if output_filename else f'video_{video_id}.mp4')
+                await self.download_segments(segments_url, bandwidth, options, output_filename if output_filename else f'video_{video_id}.mp4')
             else:
                 print('[-] Master playlist were not received')
         else:
             print('[-] Options were not received')
+
+    async def stream_segments(
+        self,
+        url: str
+    ):
+        response = await self.client.get(url)
+        if response.status_code == 200:
+            raw_segments = response.text
+        else:
+            print(f'[{response.status_code}] Unknown error when receiving segments')
+            return
+
+        segments = [line.strip() for line in raw_segments.splitlines() if line.endswith('.ts')]
+
+        base_url = urljoin(url.rsplit('/', 1)[0] + '/', '')
+
+        for i, segment_name in enumerate(segments):
+            segment_path = f'{base_url}/{segment_name}'
+
+            async with self.client.stream('GET', segment_path) as segment_response:
+                if segment_response.status_code == 200:
+                    async for chunk in segment_response.aiter_bytes(chunk_size=1024*1024):
+                        if chunk:
+                            yield chunk
+
+    async def stream_video(
+        self,
+        video_id: str
+    ):
+        print('[i] Getting video options')
+        options = await self.get_video_options(video_id=video_id)
+        if options:
+            print('[i] Getting master playlist')
+            master_playlist_url = options['video_balancer']['default']
+            master_playlist = await self.get_master_playlist(master_playlist_url)
+            if master_playlist:
+                segments_url, bandwidth = self.get_best_quality_url(master_playlist)
+                async for chunk in self.stream_segments(segments_url):
+                    yield chunk
+            else:
+                print('[-] Master playlist were not received')
+        else:
+            print('[-] Options were not received')
+
+async def main():
+    async with RutubeDownloader() as dl:
+        await dl.download_video('2eca600bc203b4afaa47961816d71fc2') 
+
+if __name__ == '__main__':
+    asyncio.run(main())

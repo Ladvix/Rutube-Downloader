@@ -1,9 +1,6 @@
 # Rutube-Downloader
 
-A simple media downloader from the website rutube.ru
-
-> [!IMPORTANT]
-> FFmpeg is required for the script to work.
+A simple async media downloader from the website rutube.ru
 
 ## Install
 
@@ -16,13 +13,15 @@ pip install -r requirements.txt
 ## Usage
 
 ```python
-from rutube_downloader.main import RutubeDownloader
+import asyncio
+from src.downloader import RutubeDownloader
 
-downloader = RutubeDownloader()
-downloader.download_video(
-    video_id='...', 
-    output_filename='video.mp4',
-)
+async def main():
+    async with RutubeDownloader() as dl:
+        await dl.download_video('') # Paste here video_id
+
+if __name__ == '__main__':
+    asyncio.run(main())
 ```
 
 > [!IMPORTANT]
