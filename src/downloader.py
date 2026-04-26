@@ -183,10 +183,3 @@ class RutubeDownloader():
                 print('[-] Master playlist were not received')
         else:
             print('[-] Options were not received')
-
-async def main():
-    async with RutubeDownloader() as dl:
-        await dl.download_video('2eca600bc203b4afaa47961816d71fc2') 
-
-if __name__ == '__main__':
-    asyncio.run(main())
