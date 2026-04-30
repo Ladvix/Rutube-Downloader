@@ -3,7 +3,8 @@ from src.downloader import RutubeDownloader
 
 async def main():
     async with RutubeDownloader() as dl:
-        await dl.download_video('c6f1e7ede7bcd7a3638975093e89400c', mode='quickly') # Paste here video_id
+        await dl.download_video('') # Paste here video_id
+        # Use mode='quickly' for fast downloading
 
 if __name__ == '__main__':
     asyncio.run(main())
