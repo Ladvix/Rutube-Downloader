@@ -1,6 +1,11 @@
+import os
 import re
 import time
 import httpx
+import shutil
+import asyncio
+import aiofiles
+from pathlib import Path
 from typing import Dict, Optional, Tuple
 from urllib.parse import urljoin
 
@@ -17,6 +22,8 @@ class RutubeDownloader():
             'Origin': self.base_url,
             'Referer': self.base_url
         }
+
+        self.max_parallel = 10
 
     async def __aenter__(self):
         self.client = httpx.AsyncClient(headers=self.headers, follow_redirects=True)
@@ -119,7 +126,7 @@ class RutubeDownloader():
         segments = [line.strip() for line in raw_segments.splitlines() if line.endswith('.ts')]
 
         downloaded_bytes = 0
-        size = (bandwidth*(video_options['duration']/1000))/(8*1024**2)
+        size = (bandwidth * (video_options['duration'] / 1000)) / (8 * 1024**2)
         time_start = time.perf_counter()
         base_url = urljoin(url.rsplit('/', 1)[0] + '/', '')
 
@@ -145,21 +152,31 @@ class RutubeDownloader():
     async def download_video(
         self,
         video_id: str,
+        mode: Optional[str] = None,
         output_filename: Optional[str] = None
     ):
-        print('[i] Getting video options')
-        options = await self.get_video_data(video_id=video_id)
-        if options:
-            print('[i] Getting master playlist')
-            master_playlist_url = options['video_balancer']['default']
-            master_playlist = await self.get_master_playlist(master_playlist_url)
-            if master_playlist:
-                segments_url, bandwidth = self.get_best_quality_url(master_playlist)
-                await self.download_segments(segments_url, bandwidth, options, output_filename if output_filename else f'video_{video_id}.mp4')
-            else:
-                print('[-] Master playlist was not received')
-        else:
-            print('[-] Options were not received')
+        video_data = await self.get_video_data(video_id)
+        if not video_data:
+            print('[-] Video data was not received')
+            return
+
+        data = video_data.get('video_balancer') or {}
+        master_playlist_url = data.get('default') or ''
+        if not master_playlist_url:
+            print('[-] Master playlist url was not received')
+            return
+
+        master_playlist = await self.get_master_playlist(master_playlist_url)
+        if not master_playlist:
+            print('[-] Master playlist was not received')
+            return
+
+        segments_url, bandwidth = self.get_best_quality_url(master_playlist)
+
+        if not mode:
+            await self.download_segments(segments_url, bandwidth, video_data, output_filename if output_filename else f'video_{video_id}.mp4')
+        elif mode == 'quickly':
+            await self.quickly_download_segments(segments_url, bandwidth, video_data, output_filename if output_filename else f'video_{video_id}.mp4')
 
     async def stream_segments(
         self,
